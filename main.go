@@ -64,7 +64,7 @@ type bug struct {
 	targetVersion string
 	blockerFlag   string
 	bugzillaLink  string
-	priority      string
+	severity      string
 	status        string
 }
 
@@ -93,7 +93,7 @@ func init() {
 	flag.StringSliceVar(&blockers, "blocker", []string{}, "comma separated list of valid blocker bug flag value (eg. '+,-,?'), default is all bugs")
 	flag.BoolVar(&blockersOnly, "blockers-only", true, "if set, the list will include bugs without blocker bug flag set")
 	flag.StringSliceVar(&teams, "teams", []string{}, fmt.Sprintf("only show bugs for components owned by given team name (valid teams: %q), default is all teams", teamNames(teamsConfig)))
-	flag.StringSliceVar(&bugStatus, "status", []string{}, fmt.Sprintf("only include bugs that has this status"))
+	flag.StringSliceVar(&bugStatus, "status", []string{}, fmt.Sprintf("only include bugs that has this status (valid: 'done,inprogress,codereview,qereview,todo')"))
 	flag.StringSliceVar(&bugNotStatus, "not-status", []string{}, fmt.Sprintf("only include bugs that has not this status"))
 	flag.BoolVar(&counts, "counts", false, "show counts")
 }
@@ -142,41 +142,58 @@ func main() {
 		if err != nil {
 			bugzillaLink = "<unknown>"
 		}
+		severity := "-"
+		severityMap, err := issue.Fields.Unknowns.MarshalMap("customfield_12316142")
+		if err == nil {
+			severityString, err := severityMap.String("value")
+			if err == nil {
+				severity = parseSeverityValue(severityString)
+			}
+		}
 
 		bugs[i] = bug{
 			summary:       removeBugzillaID(issue.Fields.Summary),
 			component:     strings.Join(components, ","),
 			version:       strings.Join(versions, ","),
 			targetVersion: strings.Join(targetVersions, ","),
-			priority:      getPriorityString(issue.Fields.Priority),
+			severity:      severity,
 			blockerFlag:   blocker,
 			bugzillaLink:  bugzillaLink,
-			status:        issue.Fields.Status.Name,
+			status:        strings.ToLower(strings.ReplaceAll(issue.Fields.Status.Name, " ", "")),
 		}
 	}
 
-	var list []pterm.BulletListItem
-
 	if hasBlocker("+") {
-		list = append(list, pterm.BulletListItem{Level: 0, Text: "blocker+ bugs", TextStyle: pterm.NewStyle(pterm.FgRed)})
-		list = append(list, bugsToBulletListItem(bugsWithVersion(targetVersions, versions, bugsWithBlocker("blocker+", bugs)), 1)...)
+		if list := bugsToBulletListItem(bugsWithVersion(targetVersions, versions, bugsWithBlocker("blocker+", bugsWithStatus(bugs))), 1); len(list) > 0 {
+			pterm.DefaultHeader.Println("blocker+ bugs")
+			pterm.Println()
+			pterm.DefaultBulletList.WithItems(list).Render()
+		}
 	}
 	if hasBlocker("-") {
-		list = append(list, pterm.BulletListItem{Level: 0, Text: "blocker- bugs", TextStyle: pterm.NewStyle(pterm.FgGreen)})
-		list = append(list, bugsToBulletListItem(bugsWithVersion(targetVersions, versions, bugsWithBlocker("blocker-", bugs)), 1)...)
+		if list := bugsToBulletListItem(bugsWithVersion(targetVersions, versions, bugsWithBlocker("blocker-", bugsWithStatus(bugs))), 1); len(list) > 0 {
+			pterm.DefaultHeader.Println("blocker- bugs")
+			pterm.Println()
+			pterm.DefaultBulletList.WithItems(list).Render()
+		}
 	}
 	if hasBlocker("?") {
-		list = append(list, pterm.BulletListItem{Level: 0, Text: "blocker? bugs", TextStyle: pterm.NewStyle(pterm.FgGray)})
-		list = append(list, bugsToBulletListItem(bugsWithVersion(targetVersions, versions, bugsWithBlocker("blocker?", bugs)), 1)...)
+		if list := bugsToBulletListItem(bugsWithVersion(targetVersions, versions, bugsWithBlocker("blocker?", bugsWithStatus(bugs))), 1); len(list) > 0 {
+			pterm.DefaultHeader.Println("blocker? bugs")
+			pterm.Println()
+			pterm.DefaultBulletList.WithItems(list).Render()
+		}
 	}
 	if hasBlocker("") && !blockersOnly {
-		list = append(list, pterm.BulletListItem{Level: 0, Text: "no blocker bugs", TextStyle: pterm.NewStyle(pterm.FgGray)})
-		list = append(list, bugsToBulletListItem(bugsWithVersion(targetVersions, versions, bugsWithBlocker("", bugs)), 1)...)
+		if list := bugsToBulletListItem(bugsWithVersion(targetVersions, versions, bugsWithBlocker("", bugsWithStatus(bugs))), 1); len(list) > 0 {
+			pterm.DefaultHeader.Println("other bugs")
+			pterm.Println()
+			pterm.DefaultBulletList.WithItems(list).Render()
+		}
 	}
 
-	pterm.DefaultBulletList.WithItems(list).Render()
-
 	if counts {
+		pterm.Println()
 		printBugCounts(bugsWithVersion(targetVersions, versions, bugs))
 	}
 }
@@ -191,30 +208,6 @@ func printBugCounts(bugs []bug) {
 		result = append(result, fmt.Sprintf(" > %s = %d", status, count))
 	}
 	fmt.Printf("%s\n-> Total: %d\n", strings.Join(result, "\n"), len(bugs))
-}
-
-func getPriorityString(priority *jira.Priority) string {
-	if priority == nil {
-		return ""
-	}
-	v := strings.ToLower(priority.Name)
-	// TODO: too many characters jira, too many characters!
-	if v == "unprioritized" {
-		return ""
-	}
-	return strings.ToLower(priority.Name)
-}
-
-func hasStatus(statuses []string, status string) bool {
-	if len(statuses) == 0 {
-		return true
-	}
-	for _, s := range statuses {
-		if s == status {
-			return true
-		}
-	}
-	return false
 }
 
 func hasBlocker(flag string) bool {
@@ -258,6 +251,36 @@ func bugsWithVersion(targetVersion, version []string, bugs []bug) []bug {
 	return result
 }
 
+func bugsWithStatus(bugs []bug) []bug {
+	result := []bug{}
+	for i := range bugs {
+		includeBug := false
+
+		for _, s := range bugStatus {
+			if bugs[i].status == s {
+				includeBug = true
+			}
+		}
+
+		if !includeBug {
+			skipBug := false
+			for _, s := range bugNotStatus {
+				if bugs[i].status == s {
+					skipBug = true
+				}
+			}
+			includeBug = true
+			if skipBug {
+				includeBug = false
+			}
+		}
+		if includeBug {
+			result = append(result, bugs[i])
+		}
+	}
+	return result
+}
+
 func bugsWithBlocker(flagValue string, bugs []bug) []bug {
 	result := []bug{}
 	for i := range bugs {
@@ -268,19 +291,65 @@ func bugsWithBlocker(flagValue string, bugs []bug) []bug {
 	return result
 }
 
-func colorByPriority(priority string) *pterm.Style {
-	switch priority {
-	case "urgent":
-		return pterm.NewStyle(pterm.FgLightRed, pterm.Bold)
-	case "high":
-		return pterm.NewStyle(pterm.FgRed)
+func colorBySeverity(severity string) *pterm.Style {
+	switch severity {
+	/*
+		case "urgent":
+			return pterm.NewStyle(pterm.FgLightRed, pterm.Bold)
+		case "high":
+			return pterm.NewStyle(pterm.FgRed)
+	*/
 	default:
-		return nil
+		return pterm.NewStyle(pterm.FgLightWhite)
 	}
 }
 
-func parseStatus(status string) string {
-	return strings.ToLower(strings.ReplaceAll(status, " ", ""))
+func severityLabel(severity string) string {
+	switch severity {
+	case "urgent":
+		return pterm.NewStyle(pterm.BgRed, pterm.FgBlack, pterm.Bold).Sprintf(" URGENT ")
+	case "high":
+		return pterm.NewStyle(pterm.BgLightRed, pterm.FgBlack).Sprintf("  HIGH  ")
+	case "medium":
+		return pterm.NewStyle(pterm.FgGray).Sprintf(" MEDIUM ")
+	case "low":
+		return pterm.NewStyle(pterm.FgLightWhite).Sprintf("  LOW   ")
+	default:
+		return pterm.NewStyle(pterm.BgRed, pterm.FgBlack).Sprintf("   -    ")
+	}
+}
+
+func statusLabel(status string) string {
+	switch status {
+	case "todo":
+		return pterm.NewStyle(pterm.BgBlack, pterm.FgLightWhite).Sprintf("   NEW    ")
+	case "inprogress":
+		return pterm.NewStyle(pterm.BgBlack, pterm.FgLightWhite).Sprintf(" ASSIGNED ")
+	case "codereview":
+		return pterm.NewStyle(pterm.BgBlack, pterm.FgLightWhite).Sprintf(" MODIFIED ")
+	case "qereview":
+		return pterm.NewStyle(pterm.BgBlack, pterm.FgLightWhite).Sprintf("   ONQE   ")
+	case "done":
+		return pterm.NewStyle(pterm.BgBlack, pterm.FgLightWhite).Sprintf("  CLOSED  ")
+	default:
+		return pterm.NewStyle(pterm.BgBlack, pterm.FgLightWhite).Sprintf("  UNKNOWN ")
+	}
+}
+
+func parseSeverityValue(value string) string {
+	// "<img alt=\"\" src=\"/images/icons/priorities/high.svg\" width=\"16\" height=\"16\"> High
+	if i := strings.LastIndex(value, ">"); i > 0 {
+		return strings.TrimSpace(strings.ToLower(value[i+1:]))
+	} else {
+		return "-"
+	}
+}
+
+func trimSummary(summary string) string {
+	if len(summary) > 80 {
+		return strings.TrimSpace(summary)[:79] + "..."
+	}
+	return summary
 }
 
 func bugsToBulletListItem(bugs []bug, level int) []pterm.BulletListItem {
@@ -288,8 +357,7 @@ func bugsToBulletListItem(bugs []bug, level int) []pterm.BulletListItem {
 	for i := range bugs {
 		result[i] = pterm.BulletListItem{
 			Level:       level,
-			Text:        fmt.Sprintf("%s | %s | [%s][%s][%s]", bugs[i].bugzillaLink, bugs[i].summary, bugs[i].targetVersion, bugs[i].priority, parseStatus(bugs[i].status)),
-			TextStyle:   colorByPriority(bugs[i].priority),
+			Text:        fmt.Sprintf("%s%s %s | %s | [%s][%s]", severityLabel(bugs[i].severity), statusLabel(bugs[i].status), bugs[i].bugzillaLink, colorBySeverity(bugs[i].severity).Sprintf(trimSummary(bugs[i].summary)), bugs[i].targetVersion, bugs[i].component),
 			Bullet:      "",
 			BulletStyle: nil,
 		}
