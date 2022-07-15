@@ -1,0 +1,7 @@
+---
+  teams:
+    - name: api
+      components:
+        - "kube-apiserver"
+        - "config-operator"
+        - "openshift-apiserver"

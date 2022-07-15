@@ -2,13 +2,16 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"strings"
 
-	jira "github.com/andygrunwald/go-jira"
+	"github.com/andygrunwald/go-jira"
+	"github.com/mfojtik/jiratools/pkg/config"
 	"github.com/pterm/pterm"
 	flag "github.com/spf13/pflag"
+	"gopkg.in/yaml.v2"
 )
 
 func blockerString(values []string) (string, bool) {
@@ -37,22 +40,21 @@ func removeBugzillaID(summary string) string {
 	}
 }
 
-func teamNames(config map[string][]string) string {
-	result := []string{}
-	for name := range config {
-		result = append(result, name)
-	}
-	return strings.Join(result, ",")
-}
-
-func teamQuery(names []string) string {
+func teamQuery(names []string, teams []config.TeamConfig) string {
 	components := []string{}
 	for _, t := range names {
-		teamComponents, ok := teamsConfig[t]
-		if !ok {
-			log.Fatalf("team %q is not configured, only %s are supported", t, teamNames(teamsConfig))
+		var teamComponents []string
+		for _, c := range teams {
+			if c.Name == t {
+				teamComponents = c.Components
+			}
 		}
 		components = append(components, teamComponents...)
+	}
+	if len(names) == 0 {
+		for _, c := range teams {
+			components = append(components, c.Components...)
+		}
 	}
 	return fmt.Sprintf(" AND component in (%s)", strings.Join(components, ","))
 }
@@ -68,14 +70,6 @@ type bug struct {
 	status        string
 }
 
-var teamsConfig = map[string][]string{
-	"api": {
-		"kube-apiserver",
-		"config-operator",
-		"openshift-apiserver",
-	},
-}
-
 var (
 	versions       []string
 	targetVersions []string
@@ -85,6 +79,7 @@ var (
 	bugStatus      []string
 	bugNotStatus   []string
 	counts         bool
+	configPath     string
 )
 
 func init() {
@@ -92,10 +87,23 @@ func init() {
 	flag.StringSliceVar(&targetVersions, "target-version", []string{}, "comma separated list of target version (fixed in) values (eg. '---,4.11.z'), default is all versions")
 	flag.StringSliceVar(&blockers, "blocker", []string{}, "comma separated list of valid blocker bug flag value (eg. '+,-,?'), default is all bugs")
 	flag.BoolVar(&blockersOnly, "blockers-only", true, "if set, the list will include bugs without blocker bug flag set")
-	flag.StringSliceVar(&teams, "teams", []string{}, fmt.Sprintf("only show bugs for components owned by given team name (valid teams: %q), default is all teams", teamNames(teamsConfig)))
+	flag.StringSliceVar(&teams, "teams", []string{}, fmt.Sprintf("only show bugs for components owned by given team name (valid teams: %q), default is all teams"))
 	flag.StringSliceVar(&bugStatus, "status", []string{}, fmt.Sprintf("only include bugs that has this status (valid: 'done,inprogress,codereview,qereview,todo')"))
 	flag.StringSliceVar(&bugNotStatus, "not-status", []string{}, fmt.Sprintf("only include bugs that has not this status"))
+	flag.StringVar(&configPath, "config", os.Getenv("JIRATOOL_CONFIG"), "a path to config file")
 	flag.BoolVar(&counts, "counts", false, "show counts")
+}
+
+func readConfig() config.JiraToolConfig {
+	rawBytes, err := ioutil.ReadFile(configPath)
+	if err != nil {
+		log.Fatalf("unable to read config file %q: %v", configPath, err)
+	}
+	var cfg config.JiraToolConfig
+	if err := yaml.Unmarshal(rawBytes, &cfg); err != nil {
+		log.Fatalf("unable to unmarshal YAML config file %q: %v", configPath, err)
+	}
+	return cfg
 }
 
 func main() {
@@ -106,7 +114,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("error getting jira client: %v", err)
 	}
-	query := "project = OCPBUGSM AND issuetype = Bug" + teamQuery(teams)
+
+	toolConfig := readConfig()
+
+	query := "project = OCPBUGSM AND issuetype = Bug" + teamQuery(teams, toolConfig.Teams)
 	result, _, err := client.Issue.Search(query, &jira.SearchOptions{
 		StartAt:    0,
 		MaxResults: 200,
